@@ -1,0 +1,74 @@
+# cassandra-stress user profile=file:///c:/workspace/inv-log-partiioning/config.yml ops(insert=1) -graph file=test.html title=test revision=test1
+# cassandra-stress user profile=file:///c:/workspace/inv-log-partiioning/config.yml ops(pull-for-rollup=1) -graph file=test.html title=test revision=test1
+# cassandra-stress write n=1000000 -rate threads=50
+# cassandra-stress user profile=file:///c:/workspace/inv-log-partiioning/config.yml ops(select1=1) -graph file=test.html title=test revision=test1
+keyspace: example
+keyspace_definition: |
+  CREATE KEYSPACE example WITH replication = {'class': 'SimpleStrategy', 'replication_factor' : 1};
+table: log
+table_definition: |
+ CREATE TABLE log (
+       WorkspaceId bigint,
+       Year smallint,
+       Month tinyint,
+       Day tinyint,
+       Hour tinyint,
+       Minute tinyint,
+       Second tinyint,
+       Millisecond smallint,
+       DeviceId int,
+       UtcOffsetMinutes smallint,
+       Completed boolean,
+       Requests blob,
+       Results blob,
+       PRIMARY KEY ((WorkspaceId, Year, Month, Day), Hour, Minute, Second, Millisecond, DeviceId)
+ )
+
+#   host text,
+#        bucket_time text,
+#        service text,
+#        time timestamp,
+#        metric double,
+#        state text,
+#        PRIMARY KEY ((host, bucket_time, service), time)
+ 
+#
+# Meta information for generating data
+#
+
+columnspec:
+  - name: WorkspaceId
+    population: seq(1..1)
+  - name: Year
+    population: seq(2018..2018)
+  - name: Month
+    population: seq(1..12)
+  - name: Day
+    population: seq(1..30)
+    #population: seq(1..30)
+#   - name: Hour
+#   population: uniform(1..24) 
+#  - name: Requests
+#    size: fixed(1024)
+ 
+#
+# Specs for insert queries
+#
+# insert:
+#   partitions: fixed(1)      # 1 partition per batch
+#   batchtype: UNLOGGED       # use unlogged batches
+#   select: fixed(1)/1      
+ 
+#
+# Read queries to run against the schema
+#
+queries:
+  select1:
+    cql: select * from log where WorkspaceId = ? and Year = ? and Month = ? and Day = ?
+    #cql: select * from log where WorkspaceId = ? and Year = ? and Month = ? and Day = ?
+    fields: samerow
+
+  # pick selection values from same row in partition          
+  #  get-a-value:
+  #     cql: select * from eventsrawtest where host = ? and service = ? and bucket_time = ? and time = ?
+  #     fields: samerow             # pick selection values from same row in partition
