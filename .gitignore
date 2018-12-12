@@ -1,1 +1,5 @@
 /.vscode
+Gopkg.lock
+/vendor
+debug
+*.exe

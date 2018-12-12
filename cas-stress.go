@@ -17,10 +17,24 @@ const (
 	perDayAmount       int = 3000
 )
 
-type params struct {
-	year  int
-	month int
-	day   int
+type primaryKey struct {
+	workspaceid int
+	year        int
+	month       int
+	day         int
+}
+
+type record struct {
+	*primaryKey
+	hour             int
+	minute           int
+	second           int
+	millisecond      int
+	deviceId         int
+	utcOffsetMinutes int
+	completed        bool
+	requests         []byte
+	results          []byte
 }
 
 var testDT = time.Date(2018, 06, 06, 0, 0, 0, 0, time.UTC)
@@ -62,17 +76,21 @@ func sel(threadsAmount int) {
 	}
 	defer session.Close()
 
-	ch := make(chan params)
+	ch := make(chan primaryKey)
 	var wg sync.WaitGroup
 
 	for i := 1; i <= threadsAmount; i++ {
 		go func() {
 			wg.Add(1)
-			for params := range ch {
-				q := session.Query("SELECT * from log where workspaceid = ? and year = ? and month = ? and day = ?", params.year, params.month, params.day)
+			for key := range ch {
+				q := session.Query("SELECT WorkspaceId, Year, Month, Day, Hour, Minute, Second, Millisecond, DeviceId, UtcOffsetMinutes, Completed, Requests, Results from log where workspaceid = ? and year = ? and month = ? and day = ?", key.workspaceid, key.year, key.month, key.day)
 				iter := q.Iter()
-				for iter.Scan() {
-
+				rec := record{}
+				rec.primaryKey = &primaryKey{}
+				rec.requests = make([]byte, 0)
+				rec.results = make([]byte, 0)
+				for iter.Scan(&rec.workspaceid, &rec.year, &rec.month, &rec.day, &rec.hour, &rec.minute, &rec.second, &rec.millisecond, &rec.deviceId, &rec.utcOffsetMinutes,
+					&rec.completed, &rec.requests, &rec.results) {
 				}
 				if err := iter.Close(); err != nil {
 					panic(err)
@@ -84,8 +102,8 @@ func sel(threadsAmount int) {
 
 	dt := testDT
 	for i := 0; i < daysAmount; i++ {
-		param := params{dt.Year(), int(dt.Month()), dt.Day()}
-		ch <- param
+		key := primaryKey{1, dt.Year(), int(dt.Month()), dt.Day()}
+		ch <- key
 		dt.AddDate(0, 0, 1)
 	}
 
@@ -113,7 +131,7 @@ func insert() {
 
 	startDT = time.Now()
 	tm := testDT
-	for i := int32(0); i < daysAmount; i++ {
+	for i := 0; i < daysAmount; i++ {
 		b := gocql.NewBatch(gocql.LoggedBatch)
 		for j := 0; j < perDayAmount; j++ {
 
