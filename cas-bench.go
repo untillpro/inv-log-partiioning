@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-        "log"
 	"github.com/gocql/gocql"
 	"github.com/jamiealquiza/tachymeter"
 )
