@@ -141,6 +141,19 @@ func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachyme
 	chs := make(map[int]chan primaryKey)
 	var wg sync.WaitGroup
 
+	chSum := make(chan int)
+
+	go func() {
+		sum := 0
+		for read := range chSum {
+			if read == 0 {
+				continue
+			}
+			sum += read
+			fmt.Println("read: ", sum)
+		}
+	}()
+
 	for i := 1; i <= threadsAmount; i++ {
 		ch := make(chan primaryKey)
 		chs[i] = ch
@@ -153,8 +166,13 @@ func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachyme
 					where workspaceid = ? and year = ? and month = ? and day = ?`, key.workspaceid, key.year, key.month, key.day)
 				iter := q.Iter()
 				rec := record{primaryKey: &primaryKey{}}
+				j := 1
 				for iter.Scan(&rec.workspaceid, &rec.year, &rec.month, &rec.day, &rec.hour, &rec.minute, &rec.second, &rec.millisecond, &rec.deviceId, &rec.utcOffsetMinutes,
 					&rec.completed, &rec.requests, &rec.results) {
+					j++
+					if j%100 == 0 {
+						chSum <- 100
+					}
 				}
 				if t != nil {
 					t.AddTime(time.Since(start))
@@ -176,12 +194,13 @@ func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachyme
 		if currentCh >= threadsAmount {
 			currentCh = 1
 		}
-		dt.AddDate(0, 0, 1)
+		dt = dt.AddDate(0, 0, 1)
 	}
 	for _, ch := range chs {
 		close(ch)
 	}
 	wg.Wait()
+	close(chSum)
 }
 
 func getClusterConfig(cl gocql.Consistency, host string) *gocql.ClusterConfig {
@@ -272,7 +291,7 @@ func newInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consi
 		if currentCh >= threadsAmount {
 			currentCh = 1
 		}
-		dt.AddDate(0, 0, 1)
+		dt = dt.AddDate(0, 0, 1)
 	}
 	for _, ch := range chs {
 		close(ch)
@@ -286,14 +305,19 @@ func newInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consi
 func prepareTables(cl gocql.Consistency, host string, repFactor int) {
 	session := getSession(cl, "", host)
 	defer session.Close()
+	fmt.Print("dropping keyspace...")
 	if err := session.Query("drop keyspace if exists example").Exec(); err != nil {
 		panic(err)
 	}
+	fmt.Println("done")
 
+	fmt.Print("creating keyspace...")
 	if err := session.Query(fmt.Sprintf("create keyspace example with replication = { 'class' : 'SimpleStrategy', 'replication_factor' : %d }", repFactor)).Exec(); err != nil {
 		panic(err)
 	}
+	fmt.Println("done")
 
+	fmt.Print("creating table...")
 	if err := session.Query(`
 		create table example.log (
 			WorkspaceId bigint,
@@ -313,6 +337,7 @@ func prepareTables(cl gocql.Consistency, host string, repFactor int) {
 		)`).Exec(); err != nil {
 		panic(err)
 	}
+	fmt.Println("done")
 }
 
 func clSpecified() bool {
