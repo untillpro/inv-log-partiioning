@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"math/rand"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,11 +15,11 @@ import (
 )
 
 const (
-	cCBootstrapTimeout         = 3000 * time.Second
-	DefaultDaysAmount      int = 365
-	DefaultPerDayAmount    int = 1000
-	DefaultWorkspaceId     int = 1
-	DefautConsistencyLevel     = gocql.One
+	cCBootstrapTimeout          = 3000 * time.Second
+	DefaultDaysAmount       int = 365
+	DefaultPerDayAmount     int = 1000
+	DefaultWorkspaceId      int = 1
+	DefaultConsistencyLevel     = gocql.One
 )
 
 type primaryKey struct {
@@ -85,22 +87,28 @@ func main() {
 	var daysAmount int
 	var clp clParser
 	var host string
+	var repFactor int
 	flag.StringVar(&op, "op", "", "operation: 'insert' or 'select'")
 	flag.IntVar(&wid, "wid", 1, "workspaceId")
 	flag.IntVar(&threadsAmount, "threads", 1, "threads amount used for reading")
 	flag.IntVar(&perDayAmount, "perDay", DefaultPerDayAmount, "per day amount to insert or read")
 	flag.IntVar(&daysAmount, "days", DefaultDaysAmount, "days to insert or read")
 	flag.BoolVar(&doWarmup, "no-warmup", false, "skips warmup")
-	flag.Var(&clp, "cl", "consistency level (Any, 1-One, 2-Two, 3-Three, Quorum, All, LocalQuorum, EachQuorum, LocalOne)")
+	flag.Var(&clp, "cl", "consistency level (Any, 1-One, 2-Two, 3-Three, Quorum, All, LocalQuorum, EachQuorum, LocalOne), default One")
 	flag.StringVar(&host, "host", "127.0.0.1", "host ip to connect to")
+	flag.IntVar(&repFactor, "rp", 3, "replication factor on keyspace create")
 	flag.Parse()
+
+	if !clSpecified() {
+		clp.cl = DefaultConsistencyLevel
+	}
 
 	doWarmup = !doWarmup
 
 	startDT := time.Now()
 	switch op {
 	case "insert":
-		insert(wid, daysAmount, perDayAmount, clp.cl, host)
+		newInsert(wid, daysAmount, perDayAmount, clp.cl, host, repFactor, threadsAmount)
 	case "select":
 		sel(threadsAmount, doWarmup, daysAmount, wid, clp.cl, host)
 	default:
@@ -195,51 +203,94 @@ func getSession(cl gocql.Consistency, keySpace string, host string) *gocql.Sessi
 	return session
 }
 
-func insert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consistency, host string) {
+func newInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consistency, host string, repFactor int, threadsAmount int) {
 	startDT := time.Now()
-	prepareTables(cl, host)
+	prepareTables(cl, host, repFactor)
 	fmt.Println("prepare tables:", time.Since(startDT))
 
 	session := getSession(cl, "example", host)
 	defer session.Close()
 
-	startDT = time.Now()
-	tm := testDT
-	for i := 0; i < daysAmount; i++ {
-		b := gocql.NewBatch(gocql.LoggedBatch)
-		for j := 0; j < perDayAmount; j++ {
-			req := make([]byte, 1024)
-			rand.Read(req)
-			req[1023] = 5
-			b.Query(`
-			INSERT INTO log (WorkspaceId, Year, Month, Day, Hour, Minute, Second, Millisecond, DeviceId, UtcOffsetMinutes, Completed, Requests, Results) 
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				workspaceId, tm.Year(), int(tm.Month()), tm.Day(), rand.Intn(255)-127, rand.Intn(255)-127, rand.Intn(255)-127, rand.Intn(65535)-32767,
-				rand.Intn(65535), rand.Intn(65535)-32767, true, req, []byte{})
-			if j%100 == 0 {
+	chs := make(map[int]chan primaryKey)
+	var wg sync.WaitGroup
+
+	chSum := make(chan int)
+
+	go func() {
+		sum := 0
+		for inserted := range chSum {
+			if inserted == 0 {
+				continue
+			}
+			sum += inserted
+			fmt.Println("inserted: ", sum)
+		}
+	}()
+
+	for i := 1; i <= threadsAmount; i++ {
+		ch := make(chan primaryKey)
+		chs[i] = ch
+		go func(ch chan primaryKey) {
+			wg.Add(1)
+			for key := range ch {
+				b := gocql.NewBatch(gocql.UnloggedBatch)
+				for j := 1; j <= perDayAmount; j++ {
+					req := make([]byte, 1024)
+					rand.Read(req)
+					req[1023] = 5
+					b.Query(`
+					INSERT INTO log (WorkspaceId, Year, Month, Day, Hour, Minute, Second, Millisecond, DeviceId, UtcOffsetMinutes, Completed, Requests, Results) 
+						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+						key.workspaceid, key.year, key.month, key.day, rand.Intn(255)-127, rand.Intn(255)-127, rand.Intn(255)-127, rand.Intn(65535)-32767,
+						rand.Intn(65535), rand.Intn(65535)-32767, true, req, []byte{})
+					//rec.workspaceid, rec.year, rec.month, rec.day, rec.hour, rec.minute, rec.second, rec.millisecond, rec.deviceId, rec.utcOffsetMinutes, rec.completed, rec.requests, rec.results)
+					if j%100 == 0 {
+						if err := session.ExecuteBatch(b); err != nil {
+							panic(err)
+						}
+						b = gocql.NewBatch(gocql.UnloggedBatch)
+						chSum <- 100
+					}
+					b.Size()
+				}
 				if err := session.ExecuteBatch(b); err != nil {
 					panic(err)
 				}
-				fmt.Println("inserted ", i*perDayAmount+j)
+				chSum <- b.Size()
 			}
-		}
-		if err := session.ExecuteBatch(b); err != nil {
-			panic(err)
-		}
-		fmt.Println("inserted ", b.Size())
-		tm = tm.AddDate(0, 0, 1)
+			wg.Done()
+		}(ch)
 	}
-	fmt.Println("fill DB:", time.Since(startDT))
+
+	startDT = time.Now()
+	dt := testDT
+	currentCh := 1
+	for i := 0; i < daysAmount; i++ {
+		key := primaryKey{workspaceId, dt.Year(), int(dt.Month()), dt.Day()}
+		chs[currentCh] <- key
+		currentCh++
+		if currentCh >= threadsAmount {
+			currentCh = 1
+		}
+		dt.AddDate(0, 0, 1)
+	}
+	for _, ch := range chs {
+		close(ch)
+	}
+	wg.Wait()
+	close(chSum)
+	fmt.Println("insert time:", time.Since(startDT))
+
 }
 
-func prepareTables(cl gocql.Consistency, host string) {
+func prepareTables(cl gocql.Consistency, host string, repFactor int) {
 	session := getSession(cl, "", host)
 	defer session.Close()
 	if err := session.Query("drop keyspace if exists example").Exec(); err != nil {
 		panic(err)
 	}
 
-	if err := session.Query("create keyspace example with replication = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 }").Exec(); err != nil {
+	if err := session.Query(fmt.Sprintf("create keyspace example with replication = { 'class' : 'SimpleStrategy', 'replication_factor' : %d }", repFactor)).Exec(); err != nil {
 		panic(err)
 	}
 
@@ -262,4 +313,13 @@ func prepareTables(cl gocql.Consistency, host string) {
 		)`).Exec(); err != nil {
 		panic(err)
 	}
+}
+
+func clSpecified() bool {
+	for _, str := range os.Args {
+		if strings.Contains(str, "-cl") {
+			return true
+		}
+	}
+	return false
 }
