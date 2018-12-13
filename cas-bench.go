@@ -145,13 +145,18 @@ func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachyme
 
 	go func() {
 		sum := 0
+		startDT := time.Now()
 		for read := range chSum {
 			if read == 0 {
 				continue
 			}
 			sum += read
-			fmt.Println("read: ", sum)
+			if time.Since(startDT).Seconds() > 1 {
+				fmt.Println("read: ", sum)
+				startDT = time.Now()
+			}
 		}
+		fmt.Println("read: ", sum)
 	}()
 
 	for i := 1; i <= threadsAmount; i++ {
@@ -167,13 +172,19 @@ func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachyme
 				iter := q.Iter()
 				rec := record{primaryKey: &primaryKey{}}
 				j := 1
+				testSum := 0
 				for iter.Scan(&rec.workspaceid, &rec.year, &rec.month, &rec.day, &rec.hour, &rec.minute, &rec.second, &rec.millisecond, &rec.deviceId, &rec.utcOffsetMinutes,
 					&rec.completed, &rec.requests, &rec.results) {
 					j++
 					if j%100 == 0 {
 						chSum <- 100
 					}
+					testSum += int(rec.requests[1023])
 				}
+				if testSum != 5000 {
+					panic("test failed")
+				}
+
 				if t != nil {
 					t.AddTime(time.Since(start))
 				}
@@ -234,15 +245,21 @@ func newInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consi
 	var wg sync.WaitGroup
 
 	chSum := make(chan int)
+	t := tachymeter.New(&tachymeter.Config{Size: 50})
+	wallTimeStart := time.Now()
 
 	go func() {
 		sum := 0
+		startDT := time.Now()
 		for inserted := range chSum {
 			if inserted == 0 {
 				continue
 			}
 			sum += inserted
-			fmt.Println("inserted: ", sum)
+			if time.Since(startDT).Seconds() > 1 {
+				fmt.Println("read: ", sum)
+				startDT = time.Now()
+			}
 		}
 	}()
 
@@ -263,11 +280,13 @@ func newInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consi
 						key.workspaceid, key.year, key.month, key.day, rand.Intn(255)-127, rand.Intn(255)-127, rand.Intn(255)-127, rand.Intn(65535)-32767,
 						rand.Intn(65535), rand.Intn(65535)-32767, true, req, []byte{})
 					//rec.workspaceid, rec.year, rec.month, rec.day, rec.hour, rec.minute, rec.second, rec.millisecond, rec.deviceId, rec.utcOffsetMinutes, rec.completed, rec.requests, rec.results)
+					start := time.Now()
 					if j%100 == 0 {
 						if err := session.ExecuteBatch(b); err != nil {
 							panic(err)
 						}
 						b = gocql.NewBatch(gocql.UnloggedBatch)
+						t.AddTime(time.Since(start))
 						chSum <- 100
 					}
 					b.Size()
@@ -297,9 +316,10 @@ func newInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consi
 		close(ch)
 	}
 	wg.Wait()
+	t.SetWallTime(time.Since(wallTimeStart))
 	close(chSum)
+	fmt.Println(t.Calc().String())
 	fmt.Println("insert time:", time.Since(startDT))
-
 }
 
 func prepareTables(cl gocql.Consistency, host string, repFactor int) {
