@@ -220,11 +220,13 @@ func insert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consiste
 				if err := session.ExecuteBatch(b); err != nil {
 					panic(err)
 				}
+				fmt.Println("inserted ", i*perDayAmount+j)
 			}
 		}
 		if err := session.ExecuteBatch(b); err != nil {
 			panic(err)
 		}
+		fmt.Println("inserted ", b.Size())
 		tm = tm.AddDate(0, 0, 1)
 	}
 	fmt.Println("fill DB:", time.Since(startDT))
