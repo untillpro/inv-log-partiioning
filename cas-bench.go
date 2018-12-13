@@ -181,7 +181,7 @@ func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachyme
 					}
 					testSum += int(rec.requests[1023])
 				}
-				if testSum != 5000
+				if testSum != 5000 {
 				   panic("test failed, sum", testSum)
 				}
 
