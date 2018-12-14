@@ -4,11 +4,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"math/rand"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
 	"github.com/gocql/gocql"
 	"github.com/jamiealquiza/tachymeter"
 )
@@ -168,9 +170,12 @@ func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachyme
 				q := session.Query(`
 					select WorkspaceId, Year, Month, Day, Hour, Minute, Second, Millisecond, DeviceId, UtcOffsetMinutes, Completed, Requests, Results from log 
 					where workspaceid = ? and year = ? and month = ? and day = ?`, key.workspaceid, key.year, key.month, key.day)
+				if q.GetConsistency() != gocql.Three {
+					log.Println("wrong consistency:", q.GetConsistency())
+				}
 				iter := q.Iter()
 				rec := record{primaryKey: &primaryKey{}}
-				j := 1
+				j := 0
 				testSum := 0
 				for iter.Scan(&rec.workspaceid, &rec.year, &rec.month, &rec.day, &rec.hour, &rec.minute, &rec.second, &rec.millisecond, &rec.deviceId, &rec.utcOffsetMinutes,
 					&rec.completed, &rec.requests, &rec.results) {
@@ -181,9 +186,31 @@ func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachyme
 					testSum += int(rec.requests[1023])
 				}
 
+				q = session.Query("select count(*) from log where workspaceid = ? and year = ? and month = ? and day = ?", key.workspaceid, key.year, key.month, key.day)
+				var count int
+				q.Scan(&count)
+				if (count != 1000) {
+					log.Panicln("wrong count:", count)
+					q = session.Query("select count(*) from log where workspaceid = ? and year = ? and month = ? and day = ?", key.workspaceid, key.year, key.month, key.day)
+					var count int
+					q.Scan(&count)
+					if (count != 1000) {
+						log.Panicln("wrong count:", count)
+					}
+				}
+
+				if j != 1000 {
+					log.Panicln("wrong j:", j)
+				}
+
+				if testSum != 5000 {
+					log.Panicln("wrong sum", testSum)
+				}
+
 				if t != nil {
 					t.AddTime(time.Since(start))
 				}
+
 				if err := iter.Close(); err != nil {
 					panic(err)
 				}
@@ -253,7 +280,7 @@ func newInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consi
 			}
 			sum += inserted
 			if time.Since(startDT).Seconds() > 1 {
-				fmt.Println("read: ", sum)
+				fmt.Println("inserted: ", sum)
 				startDT = time.Now()
 			}
 		}
@@ -265,23 +292,28 @@ func newInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consi
 		go func(ch chan primaryKey) {
 			wg.Add(1)
 			for key := range ch {
-				b := gocql.NewBatch(gocql.UnloggedBatch)
+				b := session.NewBatch(gocql.UnloggedBatch)
 				for j := 1; j <= perDayAmount; j++ {
 					req := make([]byte, 1024)
 					rand.Read(req)
 					req[1023] = 5
+
+					currentDate := time.Date(key.year, time.Month(key.month), key.day, 0, 0, 0, 0, time.UTC)
+					counter := int(currentDate.Sub(testDT).Hours())/24*1000 + j
 					b.Query(`
-					INSERT INTO log (WorkspaceId, Year, Month, Day, Hour, Minute, Second, Millisecond, DeviceId, UtcOffsetMinutes, Completed, Requests, Results) 
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+						INSERT INTO log (WorkspaceId, Year, Month, Day, Hour, Minute, Second, Millisecond, DeviceId, UtcOffsetMinutes, Completed, Requests, Results) 
+							VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 						key.workspaceid, key.year, key.month, key.day, rand.Intn(255)-127, rand.Intn(255)-127, rand.Intn(255)-127, rand.Intn(65535)-32767,
-						rand.Intn(65535), rand.Intn(65535)-32767, true, req, []byte{})
-					//rec.workspaceid, rec.year, rec.month, rec.day, rec.hour, rec.minute, rec.second, rec.millisecond, rec.deviceId, rec.utcOffsetMinutes, rec.completed, rec.requests, rec.results)
+						counter, rand.Intn(65535)-32767, true, req, []byte{})
+					 if b.GetConsistency() != cl {
+						log.Println("wrong consistency ", b.GetConsistency())
+					}
 					start := time.Now()
 					if j%100 == 0 {
 						if err := session.ExecuteBatch(b); err != nil {
 							panic(err)
 						}
-						b = gocql.NewBatch(gocql.UnloggedBatch)
+						b = session.NewBatch(gocql.UnloggedBatch)
 						t.AddTime(time.Since(start))
 						chSum <- 100
 					}
