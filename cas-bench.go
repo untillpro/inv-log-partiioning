@@ -122,7 +122,7 @@ func main() {
 	case "insert":
 		testInsert(wid, daysAmount, perDayAmount, clp.cl, host, repFactor, threadsAmount, keySpace, batchSize, useBatch)
 	case "select":
-		sel(threadsAmount, doWarmup, daysAmount, wid, clp.cl, host)
+		sel(threadsAmount, doWarmup, daysAmount, wid, clp.cl, host, keySpace)
 	default:
 		flag.Usage()
 	}
@@ -131,8 +131,8 @@ func main() {
 	}
 }
 
-func sel(threadsAmount int, doWarmup bool, daysAmount int, wid int, cl gocql.Consistency, host string) {
-	session := getSession(cl, "example", host)
+func sel(threadsAmount int, doWarmup bool, daysAmount int, wid int, cl gocql.Consistency, host string, keySpace string) {
+	session := getSession(cl, keySpace, host)
 	defer session.Close()
 
 	if doWarmup {
@@ -283,7 +283,7 @@ func testInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Cons
 	prepareTables(cl, host, repFactor, keySpace)
 	fmt.Println("prepare tables:", time.Since(startDT))
 
-	session := getSession(cl, "example", host)
+	session := getSession(cl, keySpace, host)
 	defer session.Close()
 
 	funcSum := func(sum int) {
