@@ -121,7 +121,7 @@ func main() {
 }
 
 func sel(threadsAmount int, doWarmup bool, daysAmount int, wid int, cl gocql.Consistency, host string) {
-	session := getSession(cl, "example", host)
+	session := getSession(cl, "example1", host)
 	defer session.Close()
 
 	if doWarmup {
