@@ -261,7 +261,7 @@ func newInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consi
 	prepareTables(cl, host, repFactor)
 	fmt.Println("prepare tables:", time.Since(startDT))
 
-	session := getSession(cl, "example", host)
+	session := getSession(cl, "example1", host)
 	defer session.Close()
 
 	chs := make(map[int]chan primaryKey)
@@ -354,20 +354,20 @@ func prepareTables(cl gocql.Consistency, host string, repFactor int) {
 	session := getSession(cl, "", host)
 	defer session.Close()
 	fmt.Print("dropping keyspace...")
-	if err := session.Query("drop keyspace if exists example").Exec(); err != nil {
+	if err := session.Query("drop keyspace if exists example1").Exec(); err != nil {
 		panic(err)
 	}
 	fmt.Println("done")
 
 	fmt.Print("creating keyspace...")
-	if err := session.Query(fmt.Sprintf("create keyspace example with replication = { 'class' : 'SimpleStrategy', 'replication_factor' : %d }", repFactor)).Exec(); err != nil {
+	if err := session.Query(fmt.Sprintf("create keyspace example1 with replication = { 'class' : 'SimpleStrategy', 'replication_factor' : %d }", repFactor)).Exec(); err != nil {
 		panic(err)
 	}
 	fmt.Println("done")
 
 	fmt.Print("creating table...")
 	if err := session.Query(`
-		create table example.log (
+		create table example1.log (
 			WorkspaceId bigint,
 			Year smallint,
 			Month tinyint,
