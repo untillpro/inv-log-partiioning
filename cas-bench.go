@@ -145,16 +145,15 @@ func sel(threadsAmount int, doWarmup bool, daysAmount int, wid int, cl gocql.Con
 	fmt.Println("reading...")
 	testSelect(session, threadsAmount, t, daysAmount, wid)
 	t.SetWallTime(time.Since(wallTimeStart))
+	fmt.Println("read time: ", time.Since(wallTimeStart))
 
 	fmt.Println(t.Calc().String())
 }
 
-func prepareGoRoutinesToBenchmark(chSum chan int, threadsAmount int, session *gocql.Session, t *tachymeter.Tachymeter, f procExec) (chs map[int]chan primaryKey, wg *sync.WaitGroup) {
-	chs = make(map[int]chan primaryKey)
+func prepareGoRoutinesToBenchmark(chSum chan int, threadsAmount int, session *gocql.Session, t *tachymeter.Tachymeter, f procExec) (ch chan primaryKey, wg *sync.WaitGroup) {
+	ch = make(chan primaryKey, threadsAmount)
 	wg = &sync.WaitGroup{}
 	for i := 1; i <= threadsAmount; i++ {
-		ch := make(chan primaryKey)
-		chs[i] = ch
 		go func(ch chan primaryKey) {
 			wg.Add(1)
 			for key := range ch {
@@ -168,11 +167,11 @@ func prepareGoRoutinesToBenchmark(chSum chan int, threadsAmount int, session *go
 			wg.Done()
 		}(ch)
 	}
-	return chs, wg
+	return ch, wg
 }
 
-func createSumProcAndGetChan(f procSum) (chSum chan int) {
-	chSum = make(chan int)
+func createSumProcAndGetChan(f procSum, threadsAmount int) (chSum chan int) {
+	chSum = make(chan int, threadsAmount)
 	go func() {
 		sum := 0
 		startDT := time.Now()
@@ -195,7 +194,7 @@ func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachyme
 	funcRead := func(sum int) {
 		fmt.Println("read: ", sum)
 	}
-	chSum := createSumProcAndGetChan(funcRead)
+	chSum := createSumProcAndGetChan(funcRead, threadsAmount)
 	funcExec := func(key primaryKey, chSum chan int, addTime func()) {
 		q := session.Query(`
 			select WorkspaceId, Year, Month, Day, Hour, Minute, Second, Millisecond, DeviceId, UtcOffsetMinutes, Completed, Requests, Results from log 
@@ -239,24 +238,7 @@ func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachyme
 		addTime()
 	}
 
-	chs, wg := prepareGoRoutinesToBenchmark(chSum, threadsAmount, session, t, funcExec)
-
-	dt := testDT
-	currentCh := 1
-	for i := 0; i < daysAmount; i++ {
-		key := primaryKey{wid, dt.Year(), int(dt.Month()), dt.Day()}
-		chs[currentCh] <- key
-		currentCh++
-		if currentCh >= threadsAmount {
-			currentCh = 1
-		}
-		dt = dt.AddDate(0, 0, 1)
-	}
-	for _, ch := range chs {
-		close(ch)
-	}
-	wg.Wait()
-	close(chSum)
+	walkThroughDaysAndBenchmark(daysAmount, wid, chSum, threadsAmount, session, funcExec, t)
 }
 
 func getClusterConfig(cl gocql.Consistency, host string) *gocql.ClusterConfig {
@@ -289,7 +271,7 @@ func testInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Cons
 	funcSum := func(sum int) {
 		fmt.Println("insert: ", sum)
 	}
-	chSum := createSumProcAndGetChan(funcSum)
+	chSum := createSumProcAndGetChan(funcSum, threadsAmount)
 	funcInsert := func(key primaryKey, chSum chan int, addTime func()) {
 		var b *gocql.Batch
 		if useBatch {
@@ -329,31 +311,28 @@ func testInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Cons
 		}
 	}
 
-	t := tachymeter.New(&tachymeter.Config{Size: 50})
-	wallTimeStart := time.Now()
-
-	chs, wg := prepareGoRoutinesToBenchmark(chSum, threadsAmount, session, t, funcInsert)
-
 	startDT = time.Now()
+	walkThroughDaysAndBenchmark(daysAmount, workspaceId, chSum, threadsAmount, session, funcInsert, tachymeter.New(&tachymeter.Config{Size: 50}))
+	fmt.Println("insert time:", time.Since(startDT))
+}
+
+func walkThroughDaysAndBenchmark(daysAmount int, workspaceId int, chSum chan int, threadsAmount int, session *gocql.Session, f procExec, t *tachymeter.Tachymeter) {
+	wallTimeStart := time.Now()
+	ch, wg := prepareGoRoutinesToBenchmark(chSum, threadsAmount, session, t, f)
+
 	dt := testDT
-	currentCh := 1
 	for i := 0; i < daysAmount; i++ {
 		key := primaryKey{workspaceId, dt.Year(), int(dt.Month()), dt.Day()}
-		chs[currentCh] <- key
-		currentCh++
-		if currentCh >= threadsAmount {
-			currentCh = 1
-		}
+		ch <- key
 		dt = dt.AddDate(0, 0, 1)
 	}
-	for _, ch := range chs {
-		close(ch)
-	}
+	close(ch)
 	wg.Wait()
-	t.SetWallTime(time.Since(wallTimeStart))
 	close(chSum)
-	fmt.Println(t.Calc().String())
-	fmt.Println("insert time:", time.Since(startDT))
+	if t != nil {
+		t.SetWallTime(time.Since(wallTimeStart))
+		fmt.Println(t.Calc().String())
+	}
 }
 
 func getInsertQuery(key primaryKey, counterIncrement int) (stmt string, values []interface{}) {
