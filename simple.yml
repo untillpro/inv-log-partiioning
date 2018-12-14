@@ -1,4 +1,5 @@
 # cassandra-stress user profile=file:///c:/workspace/inv-log-partiioning/simple.yml n=10000 ops(insert=1)
+# cassandra-stress user profile=file:///D:/workspace/go/src/dev.untill.com/inv-log-partiioning/simple.yml n=10000 ops(insert=1)
 
 # cassandra-stress user profile=file:///c:/workspace/inv-log-partiioning/config.yml ops(pull-for-rollup=1) -graph file=test.html title=test revision=test1
 # cassandra-stress write n=1000000 -rate threads=50
@@ -10,11 +11,15 @@ keyspace_definition: |
 table: log
 table_definition: |
  CREATE TABLE log (
-       den int,
-       year smallint,
+       year int,
        month int,
+       den int,       
+       hour int,  
+       minute int,
+       sec int,
+       millis int,
        amount int,
-       PRIMARY KEY ((den, year, month), amount)
+       PRIMARY KEY ((year, month, den), hour, minute, sec, millis)
  )
 
 #   host text,
@@ -30,14 +35,22 @@ table_definition: |
 #
 
 columnspec:
-  - name: den
-    population: uniform(1..12)
   - name: year
     population: fixed(2018)
   - name: month
     population: uniform(1..12)
+  - name: den
+    population: uniform(1..30)
+  - name: hour
+    population: uniform(0..23)    
+  - name: minute
+    population: uniform(0..59)    
+  - name: sec
+    population: uniform(0..59)    
   - name: amount
-    population: uniform(1..30)    
+    population: uniform(-1000..1000)      
+  - name: millis
+    population: uniform(0..999)
 
 # Specs for insert queries
 #
@@ -55,14 +68,14 @@ insert:
 #
 queries:
   putindata:
-    cql: insert into log (year, month, day) values (?, ?, ?)
+    cql: insert into log (year, month, den) values (?, ?, ?)
     fields: samerow
   select1:
-    cql: select * from log where Year = ? and Month = ? and Day = ?
+    cql: select * from log where Year = ? and Month = ? and den = ?
     #cql: select * from log where WorkspaceId = ? and Year = ? and Month = ? and Day = ?
     fields: samerow
   select2-test:
-    cql: select * from log where Year = ? and Month = ? and Day = ?
+    cql: select * from log where Year = ? and Month = ? and den = ?
     #cql: select * from log where WorkspaceId = ? and Year = ? and Month = ? and Day = ?
     fields: samerow
 

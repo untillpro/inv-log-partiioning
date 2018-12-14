@@ -77,6 +77,10 @@ func (this *clParser) Set(str string) error {
 	return nil
 }
 
+type procExec func(key primaryKey, chSum chan int, addTime func())
+
+type procSum func(sum int)
+
 var testDT = time.Date(2018, 06, 06, 0, 0, 0, 0, time.UTC)
 
 func main() {
@@ -89,6 +93,9 @@ func main() {
 	var clp clParser
 	var host string
 	var repFactor int
+	var keySpace string
+	var batchSize int
+	var useBatch bool
 	flag.StringVar(&op, "op", "", "operation: 'insert' or 'select'")
 	flag.IntVar(&wid, "wid", 1, "workspaceId")
 	flag.IntVar(&threadsAmount, "threads", 1, "threads amount used for reading")
@@ -98,6 +105,9 @@ func main() {
 	flag.Var(&clp, "cl", "consistency level (Any, 1-One, 2-Two, 3-Three, Quorum, All, LocalQuorum, EachQuorum, LocalOne), default One")
 	flag.StringVar(&host, "host", "127.0.0.1", "host ip to connect to")
 	flag.IntVar(&repFactor, "rp", 3, "replication factor on keyspace create")
+	flag.StringVar(&keySpace, "keySpace", "example", "keySpace name used to read and insert")
+	flag.IntVar(&batchSize, "batchSize", 100, "insert batch size")
+	flag.BoolVar(&useBatch, "noBatch", false, "do no use batches at all on insert. Overrides batchSize.")
 	flag.Parse()
 
 	if !clSpecified() {
@@ -105,11 +115,12 @@ func main() {
 	}
 
 	doWarmup = !doWarmup
+	useBatch = !useBatch
 
 	startDT := time.Now()
 	switch op {
 	case "insert":
-		newInsert(wid, daysAmount, perDayAmount, clp.cl, host, repFactor, threadsAmount)
+		testInsert(wid, daysAmount, perDayAmount, clp.cl, host, repFactor, threadsAmount, keySpace, batchSize, useBatch)
 	case "select":
 		sel(threadsAmount, doWarmup, daysAmount, wid, clp.cl, host)
 	default:
@@ -138,28 +149,9 @@ func sel(threadsAmount int, doWarmup bool, daysAmount int, wid int, cl gocql.Con
 	fmt.Println(t.Calc().String())
 }
 
-func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachymeter, daysAmount int, wid int) {
-	chs := make(map[int]chan primaryKey)
-	var wg sync.WaitGroup
-
-	chSum := make(chan int)
-
-	go func() {
-		sum := 0
-		startDT := time.Now()
-		for read := range chSum {
-			if read == 0 {
-				continue
-			}
-			sum += read
-			if time.Since(startDT).Seconds() > 1 {
-				fmt.Println("read: ", sum)
-				startDT = time.Now()
-			}
-		}
-		fmt.Println("read: ", sum)
-	}()
-
+func prepareGoRoutinesToBenchmark(chSum chan int, threadsAmount int, session *gocql.Session, t *tachymeter.Tachymeter, f procExec) (chs map[int]chan primaryKey, wg *sync.WaitGroup) {
+	chs = make(map[int]chan primaryKey)
+	wg = &sync.WaitGroup{}
 	for i := 1; i <= threadsAmount; i++ {
 		ch := make(chan primaryKey)
 		chs[i] = ch
@@ -167,57 +159,87 @@ func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachyme
 			wg.Add(1)
 			for key := range ch {
 				start := time.Now()
-				q := session.Query(`
-					select WorkspaceId, Year, Month, Day, Hour, Minute, Second, Millisecond, DeviceId, UtcOffsetMinutes, Completed, Requests, Results from log 
-					where workspaceid = ? and year = ? and month = ? and day = ?`, key.workspaceid, key.year, key.month, key.day)
-				if q.GetConsistency() != gocql.Three {
-					log.Println("wrong consistency:", q.GetConsistency())
-				}
-				iter := q.Iter()
-				rec := record{primaryKey: &primaryKey{}}
-				j := 0
-				testSum := 0
-				for iter.Scan(&rec.workspaceid, &rec.year, &rec.month, &rec.day, &rec.hour, &rec.minute, &rec.second, &rec.millisecond, &rec.deviceId, &rec.utcOffsetMinutes,
-					&rec.completed, &rec.requests, &rec.results) {
-					j++
-					if j%100 == 0 {
-						chSum <- 100
+				f(key, chSum, func() {
+					if t != nil {
+						t.AddTime(time.Since(start))
 					}
-					testSum += int(rec.requests[1023])
-				}
-
-				q = session.Query("select count(*) from log where workspaceid = ? and year = ? and month = ? and day = ?", key.workspaceid, key.year, key.month, key.day)
-				var count int
-				q.Scan(&count)
-				if (count != 1000) {
-					log.Panicln("wrong count:", count)
-					q = session.Query("select count(*) from log where workspaceid = ? and year = ? and month = ? and day = ?", key.workspaceid, key.year, key.month, key.day)
-					var count int
-					q.Scan(&count)
-					if (count != 1000) {
-						log.Panicln("wrong count:", count)
-					}
-				}
-
-				if j != 1000 {
-					log.Panicln("wrong j:", j)
-				}
-
-				if testSum != 5000 {
-					log.Panicln("wrong sum", testSum)
-				}
-
-				if t != nil {
-					t.AddTime(time.Since(start))
-				}
-
-				if err := iter.Close(); err != nil {
-					panic(err)
-				}
+				})
 			}
 			wg.Done()
 		}(ch)
 	}
+	return chs, wg
+}
+
+func createSumProcAndGetChan(f procSum) (chSum chan int) {
+	chSum = make(chan int)
+	go func() {
+		sum := 0
+		startDT := time.Now()
+		for add := range chSum {
+			if add == 0 {
+				continue
+			}
+			sum += add
+			if time.Since(startDT).Seconds() > 1 {
+				f(sum)
+				startDT = time.Now()
+			}
+		}
+		f(sum)
+	}()
+	return
+}
+
+func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachymeter, daysAmount int, wid int) {
+	funcRead := func(sum int) {
+		fmt.Println("read: ", sum)
+	}
+	chSum := createSumProcAndGetChan(funcRead)
+	funcExec := func(key primaryKey, chSum chan int, addTime func()) {
+		q := session.Query(`
+			select WorkspaceId, Year, Month, Day, Hour, Minute, Second, Millisecond, DeviceId, UtcOffsetMinutes, Completed, Requests, Results from log 
+			where workspaceid = ? and year = ? and month = ? and day = ?`, key.workspaceid, key.year, key.month, key.day)
+		iter := q.Iter()
+		rec := record{primaryKey: &primaryKey{}}
+		j := 0
+		testSum := 0
+		for iter.Scan(&rec.workspaceid, &rec.year, &rec.month, &rec.day, &rec.hour, &rec.minute, &rec.second, &rec.millisecond, &rec.deviceId, &rec.utcOffsetMinutes,
+			&rec.completed, &rec.requests, &rec.results) {
+			j++
+			if j%100 == 0 {
+				chSum <- 100
+			}
+			testSum += int(rec.requests[1023])
+		}
+
+		q = session.Query("select count(*) from log where workspaceid = ? and year = ? and month = ? and day = ?", key.workspaceid, key.year, key.month, key.day)
+		var count int
+		q.Scan(&count)
+		if count != 1000 {
+			log.Panicln("wrong count:", count)
+			q = session.Query("select count(*) from log where workspaceid = ? and year = ? and month = ? and day = ?", key.workspaceid, key.year, key.month, key.day)
+			q.Scan(&count)
+			if count != 1000 {
+				log.Panicln("wrong count:", count)
+			}
+		}
+
+		if j != 1000 {
+			log.Panicln("wrong j:", j)
+		}
+
+		if testSum != 5000 {
+			log.Panicln("wrong sum", testSum)
+		}
+
+		if err := iter.Close(); err != nil {
+			panic(err)
+		}
+		addTime()
+	}
+
+	chs, wg := prepareGoRoutinesToBenchmark(chSum, threadsAmount, session, t, funcExec)
 
 	dt := testDT
 	currentCh := 1
@@ -256,77 +278,61 @@ func getSession(cl gocql.Consistency, keySpace string, host string) *gocql.Sessi
 	return session
 }
 
-func newInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consistency, host string, repFactor int, threadsAmount int) {
+func testInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consistency, host string, repFactor int, threadsAmount int, keySpace string, batchSize int, useBatch bool) {
 	startDT := time.Now()
-	prepareTables(cl, host, repFactor)
+	prepareTables(cl, host, repFactor, keySpace)
 	fmt.Println("prepare tables:", time.Since(startDT))
 
 	session := getSession(cl, "example", host)
 	defer session.Close()
 
-	chs := make(map[int]chan primaryKey)
-	var wg sync.WaitGroup
+	funcSum := func(sum int) {
+		fmt.Println("insert: ", sum)
+	}
+	chSum := createSumProcAndGetChan(funcSum)
+	funcInsert := func(key primaryKey, chSum chan int, addTime func()) {
+		var b *gocql.Batch
+		if useBatch {
+			b = session.NewBatch(gocql.UnloggedBatch)
+		}
+		for j := 1; j <= perDayAmount; j++ {
+			stmt, values := getInsertQuery(key, j)
+			if useBatch {
+				b.Query(stmt, values...)
+				if b.GetConsistency() != cl {
+					log.Println("wrong consistency ", b.GetConsistency())
+				}
+				if j%batchSize == 0 {
+					if err := session.ExecuteBatch(b); err != nil {
+						panic(err)
+					}
+					b = session.NewBatch(gocql.UnloggedBatch)
+					addTime()
+					chSum <- batchSize
+				}
+			} else {
+				q := session.Query(stmt, values...)
+				if err := q.Exec(); err != nil {
+					log.Panicln(err)
+				}
+				addTime()
+				if j%batchSize == 0 {
+					chSum <- batchSize
+				}
+			}
+		}
+		if useBatch {
+			if err := session.ExecuteBatch(b); err != nil {
+				panic(err)
+			}
+			chSum <- b.Size()
+		}
+	}
 
-	chSum := make(chan int)
 	t := tachymeter.New(&tachymeter.Config{Size: 50})
 	wallTimeStart := time.Now()
 
-	go func() {
-		sum := 0
-		startDT := time.Now()
-		for inserted := range chSum {
-			if inserted == 0 {
-				continue
-			}
-			sum += inserted
-			if time.Since(startDT).Seconds() > 1 {
-				fmt.Println("inserted: ", sum)
-				startDT = time.Now()
-			}
-		}
-	}()
-
-	for i := 1; i <= threadsAmount; i++ {
-		ch := make(chan primaryKey)
-		chs[i] = ch
-		go func(ch chan primaryKey) {
-			wg.Add(1)
-			for key := range ch {
-				b := session.NewBatch(gocql.UnloggedBatch)
-				for j := 1; j <= perDayAmount; j++ {
-					req := make([]byte, 1024)
-					rand.Read(req)
-					req[1023] = 5
-
-					currentDate := time.Date(key.year, time.Month(key.month), key.day, 0, 0, 0, 0, time.UTC)
-					counter := int(currentDate.Sub(testDT).Hours())/24*1000 + j
-					b.Query(`
-						INSERT INTO log (WorkspaceId, Year, Month, Day, Hour, Minute, Second, Millisecond, DeviceId, UtcOffsetMinutes, Completed, Requests, Results) 
-							VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-						key.workspaceid, key.year, key.month, key.day, rand.Intn(255)-127, rand.Intn(255)-127, rand.Intn(255)-127, rand.Intn(65535)-32767,
-						counter, rand.Intn(65535)-32767, true, req, []byte{})
-					 if b.GetConsistency() != cl {
-						log.Println("wrong consistency ", b.GetConsistency())
-					}
-					start := time.Now()
-					if j%100 == 0 {
-						if err := session.ExecuteBatch(b); err != nil {
-							panic(err)
-						}
-						b = session.NewBatch(gocql.UnloggedBatch)
-						t.AddTime(time.Since(start))
-						chSum <- 100
-					}
-					b.Size()
-				}
-				if err := session.ExecuteBatch(b); err != nil {
-					panic(err)
-				}
-				chSum <- b.Size()
-			}
-			wg.Done()
-		}(ch)
-	}
+	chs, wg := prepareGoRoutinesToBenchmark(chSum, threadsAmount, session, t, funcInsert)
 
 	startDT = time.Now()
 	dt := testDT
@@ -350,24 +356,38 @@ func newInsert(workspaceId int, daysAmount int, perDayAmount int, cl gocql.Consi
 	fmt.Println("insert time:", time.Since(startDT))
 }
 
-func prepareTables(cl gocql.Consistency, host string, repFactor int) {
+func getInsertQuery(key primaryKey, counterIncrement int) (stmt string, values []interface{}) {
+	req := make([]byte, 1024)
+	rand.Read(req)
+	req[1023] = 5
+
+	currentDate := time.Date(key.year, time.Month(key.month), key.day, 0, 0, 0, 0, time.UTC)
+	counter := int(currentDate.Sub(testDT).Hours())/24*1000 + counterIncrement
+	stmt = `INSERT INTO log (WorkspaceId, Year, Month, Day, Hour, Minute, Second, Millisecond, DeviceId, UtcOffsetMinutes, Completed, Requests, Results) 
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	values = append(values, key.workspaceid, key.year, key.month, key.day, rand.Intn(255)-127, rand.Intn(255)-127, rand.Intn(255)-127, rand.Intn(65535)-32767,
+		counter, rand.Intn(65535)-32767, true, req, []byte{})
+	return
+}
+
+func prepareTables(cl gocql.Consistency, host string, repFactor int, keySpace string) {
 	session := getSession(cl, "", host)
 	defer session.Close()
 	fmt.Print("dropping keyspace...")
-	if err := session.Query("drop keyspace if exists example").Exec(); err != nil {
+	if err := session.Query(fmt.Sprintf("drop keyspace if exists %s", keySpace)).Exec(); err != nil {
 		panic(err)
 	}
 	fmt.Println("done")
 
 	fmt.Print("creating keyspace...")
-	if err := session.Query(fmt.Sprintf("create keyspace example with replication = { 'class' : 'SimpleStrategy', 'replication_factor' : %d }", repFactor)).Exec(); err != nil {
+	if err := session.Query(fmt.Sprintf("create keyspace %s with replication = { 'class' : 'SimpleStrategy', 'replication_factor' : %d }", keySpace, repFactor)).Exec(); err != nil {
 		panic(err)
 	}
 	fmt.Println("done")
 
 	fmt.Print("creating table...")
-	if err := session.Query(`
-		create table example.log (
+	if err := session.Query(fmt.Sprintf(`
+		create table %s.log (
 			WorkspaceId bigint,
 			Year smallint,
 			Month tinyint,
@@ -382,7 +402,7 @@ func prepareTables(cl gocql.Consistency, host string, repFactor int) {
 			Requests blob,
 			Results blob,
 			PRIMARY KEY ((WorkspaceId, Year, Month, Day), Hour, Minute, Second, Millisecond, DeviceId)
-		)`).Exec(); err != nil {
+		)`, keySpace)).Exec(); err != nil {
 		panic(err)
 	}
 	fmt.Println("done")
