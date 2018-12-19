@@ -144,10 +144,7 @@ func sel(threadsAmount int, doWarmup bool, daysAmount int, wid int, cl gocql.Con
 	wallTimeStart := time.Now()
 	fmt.Println("reading...")
 	testSelect(session, threadsAmount, t, daysAmount, wid)
-	t.SetWallTime(time.Since(wallTimeStart))
 	fmt.Println("read time: ", time.Since(wallTimeStart))
-
-	fmt.Println(t.Calc().String())
 }
 
 func prepareGoRoutinesToBenchmark(chSum chan int, threadsAmount int, session *gocql.Session, t *tachymeter.Tachymeter, f procExec) (ch chan primaryKey, wg *sync.WaitGroup) {
