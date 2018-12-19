@@ -216,20 +216,20 @@ func testSelect(session *gocql.Session, threadsAmount int, t *tachymeter.Tachyme
 		var count int
 		q.Scan(&count)
 		if count != 1000 {
-			log.Panicln("wrong count:", count)
+			log.Panicln("wrong select count(*):", count, key)
 			q = session.Query("select count(*) from log where workspaceid = ? and year = ? and month = ? and day = ?", key.workspaceid, key.year, key.month, key.day)
 			q.Scan(&count)
 			if count != 1000 {
-				log.Panicln("wrong count:", count)
+				log.Panicln("wrong select count(*) (2):", count, key)
 			}
 		}
 
 		if j != 1000 {
-			log.Panicln("wrong j:", j)
+			log.Panicln("select count(*) for key is correct but wrong values amount within key:", j, key)
 		}
 
 		if testSum != 5000 {
-			log.Panicln("wrong sum", testSum)
+			log.Panicln("wrong sum", testSum, key)
 		}
 
 		if err := iter.Close(); err != nil {
